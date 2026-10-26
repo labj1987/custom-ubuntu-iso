@@ -83,6 +83,8 @@ install_disk() {
 UUID=$root_uuid / ext4 errors=remount-ro 0 1
 UUID=$esp_uuid /boot/efi vfat umask=0077 0 1
 EOF
+    # The installer drops the install medium's apt source when it finishes.
+    rm -f "$T/etc/apt/sources.list.d/cdrom.sources"
     echo isotest > "$T/etc/hostname"
     : > "$T/etc/machine-id"
     chroot "$T" useradd -m -s /bin/bash -G sudo,adm -c Tester -p "$PASS_HASH" tester

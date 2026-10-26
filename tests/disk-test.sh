@@ -101,6 +101,7 @@ EOF
         printf '[Manager]\nDefaultEnvironment=https_proxy=%s HTTPS_PROXY=%s\n' "$TEST_PROXY" "$TEST_PROXY" > "$T/etc/systemd/system.conf.d/test-proxy.conf"
     fi
 
+    # The stock installer always sets up GRUB behind shim; first boot must wipe it.
     log "GRUB behind shim, as the installer leaves it"
     local esp="$W/esp" kver
     rm -rf "$esp"; mkdir -p "$esp/EFI/ubuntu" "$esp/EFI/BOOT"
@@ -122,7 +123,6 @@ menuentry 'Ubuntu' {
     initrd /boot/initrd.img-$kver
 }
 EOF
-    echo "grub2 grub2/update_nvram boolean false" | chroot "$T" debconf-set-selections
     mcopy -s -i "$W/esp.img" "$esp/EFI" ::/
     dd if="$W/esp.img" of="$W/disk.raw" bs=1M seek=1 conv=notrunc status=none
 

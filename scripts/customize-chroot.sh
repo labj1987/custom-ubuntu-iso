@@ -37,11 +37,6 @@ deb-src [arch=amd64,i386 signed-by=/usr/share/keyrings/steam.gpg] https://repo.s
 EOF
 dpkg --add-architecture i386
 
-# GRUB stays installed (shim-signed depends on it) as the fallback boot path.
-# Keep its package updates from rewriting the firmware boot order, so the
-# systemd-boot entry stays first.
-echo "grub2 grub2/update_nvram boolean false" | debconf-set-selections
-
 log "apt update and upgrade"
 apt-get update
 apt-get -y full-upgrade
@@ -58,6 +53,30 @@ apt-get install -y \
     openssh-server \
     gnome-remote-desktop \
     libnotify-bin zenity curl jq pciutils
+
+log "systemd-boot without GRUB"
+# The installer always puts GRUB down; first boot replaces it with this
+# package, which stands in for what shim-signed depends on.
+nogrub="$(mktemp -d)"; mkdir -p "$nogrub/DEBIAN"
+cat > "$nogrub/DEBIAN/control" <<'EOF'
+Package: custom-iso-no-grub
+Version: 1
+Architecture: all
+Maintainer: custom-iso <root@localhost>
+Section: admin
+Priority: optional
+Provides: grub-efi-amd64-signed (= 1.999), grub2-common (= 2.999)
+Conflicts: grub-common, grub2-common, grub-efi-amd64, grub-efi-amd64-bin, grub-efi-amd64-signed, grub-efi-amd64-unsigned, grub-pc, grub-pc-bin, grub-gfxpayload-lists
+Replaces: grub-common, grub2-common, grub-efi-amd64, grub-efi-amd64-bin, grub-efi-amd64-signed, grub-efi-amd64-unsigned, grub-pc, grub-pc-bin, grub-gfxpayload-lists
+Description: no GRUB: systemd-boot is the boot loader
+ Stands in for GRUB so shim-signed stays installed without it.
+EOF
+dpkg-deb -Zxz --root-owner-group -b "$nogrub" /usr/local/lib/custom-iso/no-grub.deb
+rm -rf "$nogrub"
+# The systemd-boot package installs shim on the ESP from Debian's file names;
+# Ubuntu ships the same signed binaries without the .signed suffix.
+ln -sf fbx64.efi /usr/lib/shim/fbx64.efi.signed
+ln -sf mmx64.efi /usr/lib/shim/mmx64.efi.signed
 
 log "Flatpak: Flathub and apps (system-wide)"
 flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo

@@ -4,11 +4,11 @@
 #
 #  1. SSH host keys for this install.
 #  2. OpenRGB: udev rules from the Flatpak, i2c-dev for GPU RGB control.
-#  3. systemd-boot as the default boot entry, loaded through shim and signed
+#  3. systemd-boot as the only boot loader, loaded through shim and signed
 #     with Kernel Pop's kernel-signing key (same key, same location, so one
-#     MOK enrollment covers the boot loader and Kernel Pop's kernels).
-#     It becomes the default boot entry only after the key is enrolled (or
-#     right away with Secure Boot off); until then GRUB keeps booting.
+#     MOK enrollment covers the boot loader and Kernel Pop's kernels). The
+#     GRUB the installer put down is wiped: packages, /boot/grub, its ESP
+#     files and its firmware entry.
 #  4. GNOME Remote Desktop "Remote Login" (port 3389): TLS certificate and
 #     enabled; the login itself is set at first user login.
 #  5. With Secure Boot on: queue the key for enrollment and reboot once into
@@ -72,11 +72,23 @@ EOF
     fi
 }
 
-esp_disk_and_part() {
-    local src dev
-    src="$(findmnt -no SOURCE "$ESP")" || return 1
-    dev="$(basename "$(readlink -f "$src")")"
-    echo "/dev/$(lsblk -no PKNAME "/dev/$dev") $(cat "/sys/class/block/$dev/partition")"
+# The installer always sets up GRUB. Swap its packages for custom-iso-no-grub
+# (shim-signed depends on GRUB; this stands in for it), then remove what the
+# packages leave: /boot/grub, its ESP files and its firmware entry.
+wipe_grub() {
+    local pkgs num
+    if dpkg-query -W -f='${Status}\n' 'grub*' os-prober 2>/dev/null | grep -q '^install ok installed'; then
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 -y install /usr/local/lib/custom-iso/no-grub.deb \
+            || { log "ERROR: could not remove the GRUB packages"; return 1; }
+    fi
+    mapfile -t pkgs < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'grub*' os-prober 2>/dev/null | awk '$1 == "rc" {print $2}')
+    (( ${#pkgs[@]} )) && dpkg --purge "${pkgs[@]}" >/dev/null
+    rm -rf /boot/grub "$ESP/EFI/ubuntu" "$ESP/EFI/BOOT"
+    # GRUB's entry is shim (or GRUB) in EFI/ubuntu with nothing passed to it.
+    for num in $(efibootmgr | sed -nE 's/^Boot([0-9A-Fa-f]{4})\*? .*[\\/]EFI\\ubuntu\\(shim|grub)x64\.efi$/\1/Ip'); do
+        efibootmgr -q -b "$num" -B
+    done
+    log "GRUB removed (packages, /boot/grub, ESP files, firmware entry)"
 }
 
 setup_systemd_boot() {
@@ -85,7 +97,7 @@ setup_systemd_boot() {
     generate_signing_key || { log "ERROR: could not create the signing key"; return 1; }
 
     # Kernel command line for the boot entries: what this boot was started
-    # with, minus the GRUB-only parts.
+    # with, minus the boot loader's own parts.
     if [[ ! -s /etc/kernel/cmdline ]]; then
         tr ' ' '\n' < /proc/cmdline | grep -vE '^(BOOT_IMAGE=|initrd=|$)' | tr '\n' ' ' \
             | sed 's/ $//' > /etc/kernel/cmdline
@@ -95,15 +107,8 @@ setup_systemd_boot() {
     # Signed copy next to the original; bootctl installs the .signed one.
     /usr/local/lib/custom-iso/sdboot-sign.sh --sign-only || return 1
 
-    # Keep the removable-media fallback (GRUB's shim) as it is.
-    local keep; keep="$(mktemp -d)"
-    cp -a "$ESP/EFI/BOOT" "$keep/" 2>/dev/null || true
+    wipe_grub || return 1
     bootctl install --no-variables --esp-path="$ESP" || { log "ERROR: bootctl install failed"; return 1; }
-    if [[ -d "$keep/BOOT" ]]; then
-        rm -rf "$ESP/EFI/BOOT"; cp -a "$keep/BOOT" "$ESP/EFI/BOOT"
-    fi
-    rm -rf "$keep"
-
     cat > "$ESP/loader/loader.conf" <<'EOF'
 timeout 3
 editor no
@@ -118,40 +123,15 @@ EOF
             && log "Boot entry added for $k" || log "WARNING: kernel-install failed for $k"
     done
 
-    # shim + signed systemd-boot in EFI/systemd, and a firmware entry for it.
-    # The entry goes LAST in the boot order: shim refuses this systemd-boot
-    # until its key is enrolled, and the firmware does not fall back after
-    # that refusal. promote_sdboot moves it first once the key is trusted.
-    /usr/local/lib/custom-iso/sdboot-sign.sh --refresh-esp || return 1
-    if [[ -z "$(sdboot_entry)" ]]; then
-        local order; order="$(efibootmgr | awk -F': ' '/^BootOrder:/ {print $2}')"
-        read -r disk part <<< "$(esp_disk_and_part)"
-        efibootmgr -q -c -d "$disk" -p "$part" -L "Ubuntu (systemd-boot)" -l '\EFI\systemd\shimx64.efi' \
-            || { log "ERROR: efibootmgr could not create the boot entry"; return 1; }
-        [[ -n "$order" ]] && efibootmgr -q -o "$order,$(sdboot_entry)"
-        log "Firmware boot entry created on $disk partition $part (after GRUB until the key is enrolled)"
-    fi
+    # The systemd-boot package puts shim and MOK Manager in EFI/ubuntu and
+    # EFI/BOOT and creates the "Ubuntu" firmware entry, first in the boot
+    # order: shim with \EFI\systemd\systemd-bootx64.efi as what it loads.
+    DEBIAN_FRONTEND=noninteractive dpkg-reconfigure systemd-boot \
+        || { log "ERROR: systemd-boot could not install shim on the ESP"; return 1; }
+    efibootmgr | grep -qiE '^Boot[0-9A-F]{4}\*? Ubuntu[[:space:]].*[\\/]EFI\\ubuntu\\shimx64\.efi.+' \
+        || { log "ERROR: no Ubuntu (shim -> systemd-boot) firmware entry"; return 1; }
+    log "systemd-boot installed behind shim; firmware entry \"Ubuntu\" is first in the boot order"
     done_mark sdboot-installed
-}
-
-sdboot_entry() { efibootmgr | awk '/Ubuntu \(systemd-boot\)/ {sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1; exit}'; }
-
-key_trusted() {
-    ! secure_boot_on && return 0
-    mokutil --test-key "$MOK_DIR/signing.der" 2>/dev/null | grep -qiE "already enrolled|already in db|built-in"
-}
-
-# systemd-boot becomes the default only once shim will accept it.
-promote_sdboot() {
-    is_done sdboot-default && return 0
-    is_done sdboot-installed || return 0
-    key_trusted || { log "Signing key not enrolled yet: GRUB stays the default boot entry"; return 0; }
-    local id order rest
-    id="$(sdboot_entry)"; [[ -n "$id" ]] || { log "WARNING: systemd-boot firmware entry missing"; return 0; }
-    order="$(efibootmgr | awk -F': ' '/^BootOrder:/ {print $2}')"
-    rest="$(tr ',' '\n' <<< "$order" | grep -vx "$id" | paste -sd, -)"
-    efibootmgr -q -o "$id${rest:+,$rest}" \
-        && { log "systemd-boot is now the default boot entry"; done_mark sdboot-default; }
 }
 
 secure_boot_on() { mokutil --sb-state 2>/dev/null | grep -q "SecureBoot enabled"; }
@@ -195,14 +175,11 @@ setup_remote_login() {
         || log "WARNING: Remote Login setup failed; it is retried next boot"
 }
 
-setup_systemd_boot || log "systemd-boot setup failed; GRUB still boots this system. Retried next boot."
+setup_systemd_boot || log "ERROR: systemd-boot setup failed; retried next boot"
 setup_remote_login
 is_done sdboot-installed && queue_mok
-promote_sdboot
 
-# Runs every boot until everything, including the switch to systemd-boot
-# after enrollment, is done.
-if is_done sdboot-default && is_done mok-queued && is_done remote-login; then
+if is_done sdboot-installed && is_done mok-queued && is_done remote-login; then
     done_mark firstboot-done
 fi
 

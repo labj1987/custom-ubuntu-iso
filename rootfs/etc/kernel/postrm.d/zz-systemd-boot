@@ -1,0 +1,5 @@
+#!/bin/sh
+# Remove a removed kernel's systemd-boot entry.
+set -e
+[ -e /var/lib/custom-iso/sdboot-installed ] || exit 0
+kernel-install remove "$1" || true

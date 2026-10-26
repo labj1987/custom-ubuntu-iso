@@ -1,0 +1,13 @@
+[Unit]
+Description=Custom ISO: TLP power management on laptops
+ConditionPathExists=!/var/lib/custom-iso/laptop-power-done
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/custom-iso/laptop-power.sh
+TimeoutStartSec=20min
+
+[Install]
+WantedBy=multi-user.target

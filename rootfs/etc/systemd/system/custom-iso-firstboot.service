@@ -1,0 +1,15 @@
+[Unit]
+Description=Custom ISO first boot: SSH host keys, systemd-boot with Secure Boot signing, remote login setup
+ConditionPathExists=!/var/lib/custom-iso/firstboot-done
+RequiresMountsFor=/boot/efi /var
+Before=display-manager.service ssh.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/custom-iso/firstboot.sh
+StandardOutput=journal+console
+RemainAfterExit=yes
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

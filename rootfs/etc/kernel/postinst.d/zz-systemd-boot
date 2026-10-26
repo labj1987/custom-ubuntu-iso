@@ -1,0 +1,13 @@
+#!/bin/sh
+# Add a systemd-boot entry for a newly installed Ubuntu kernel. Runs after
+# the dracut hook, so its initramfs already exists.
+set -e
+[ -e /var/lib/custom-iso/sdboot-installed ] || exit 0
+kver="$1"
+img="${2:-/boot/vmlinuz-$kver}"
+initrd="/boot/initrd.img-$kver"
+if [ -f "$initrd" ]; then
+    kernel-install add "$kver" "$img" "$initrd"
+else
+    kernel-install add "$kver" "$img"
+fi

@@ -1,0 +1,2 @@
+// Re-sign systemd-boot and refresh the shim chain on the ESP after package changes.
+DPkg::Post-Invoke { "if [ -x /usr/local/lib/custom-iso/sdboot-sign.sh ]; then /usr/local/lib/custom-iso/sdboot-sign.sh || true; fi"; };

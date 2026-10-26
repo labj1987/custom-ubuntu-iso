@@ -1,0 +1,23 @@
+#cloud-config
+# Test-only unattended install for the VM check (vm-test.sh). Never used by
+# the real ISO: installs from it stay interactive. Throwaway VM user
+# "tester" / "test1234".
+autoinstall:
+  version: 1
+  source:
+    id: ubuntu-desktop
+    search_drivers: false
+  identity:
+    hostname: isotest
+    realname: Tester
+    username: tester
+    password: "$6$testsalt$94BDrjBBTI.wuCfWdfx6B/AgWUD0PgWiE8SanatLntzmej2fPex1EEHetoKv96Mfx2/fahQvekxgNJz7AqyJA1"
+  storage:
+    layout:
+      name: direct
+  codecs:
+    install: false
+  drivers:
+    install: false
+  updates: security
+  shutdown: poweroff

@@ -63,11 +63,12 @@ setup_rdp() {
             -keyout "$d/rdp-tls.key" -out "$d/rdp-tls.crt" 2>/dev/null
         chmod 0600 "$d/rdp-tls.key"
     fi
-    form="$(zenity --forms --title="Remote desktop" \
-        --text="Choose the login for connecting to this computer over RDP\n(Desktop Sharing on port 3390, Remote Login on port 3389)." \
-        --add-entry="Username" --add-password="Password" --separator=$'\x1f' 2>/dev/null)" \
+    # The username/password dialog submits on Enter (a --forms dialog doesn't).
+    # It prints "user|password"; a username cannot contain "|".
+    form="$(zenity --password --username \
+        --title="RDP login for this computer (Desktop Sharing 3390, Remote Login 3389)" 2>/dev/null)" \
         || { log "Remote desktop login skipped; asked again next login"; return 1; }
-    user="${form%%$'\x1f'*}"; pass="${form#*$'\x1f'}"
+    user="${form%%|*}"; pass="${form#*|}"
     [[ -n "$user" && -n "$pass" ]] || { log "Empty remote desktop login; asked again next login"; return 1; }
 
     # Desktop Sharing: this user's live session.

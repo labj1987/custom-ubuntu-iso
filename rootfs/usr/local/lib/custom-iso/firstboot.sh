@@ -128,6 +128,7 @@ EOF
     # order: shim with \EFI\systemd\systemd-bootx64.efi as what it loads.
     DEBIAN_FRONTEND=noninteractive dpkg-reconfigure systemd-boot \
         || { log "ERROR: systemd-boot could not install shim on the ESP"; return 1; }
+    /usr/local/lib/custom-iso/sdboot-sign.sh --prune
     efibootmgr | grep -qiE '^Boot[0-9A-F]{4}\*? Ubuntu[[:space:]].*[\\/]EFI\\ubuntu\\shimx64\.efi.+' \
         || { log "ERROR: no Ubuntu (shim -> systemd-boot) firmware entry"; return 1; }
     log "systemd-boot installed behind shim; firmware entry \"Ubuntu\" is first in the boot order"

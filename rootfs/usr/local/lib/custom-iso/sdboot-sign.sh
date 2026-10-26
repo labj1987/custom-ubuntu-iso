@@ -1,7 +1,8 @@
 #!/bin/bash
 # Keeps systemd-boot signed with Kernel Pop's key and current on the ESP.
 #   --sign-only    sign systemd-boot into the .signed copy bootctl installs
-#   (no argument)  sign, then bootctl update; run by apt after every dpkg run
+#   --prune        remove the "Linux Boot Manager" firmware entries
+#   (no argument)  sign, bootctl update, prune; run by apt after every dpkg run
 #
 # shim and MOK Manager on the ESP (EFI/ubuntu, EFI/BOOT) and the "Ubuntu"
 # firmware entry belong to the systemd-boot package: it installs them when a
@@ -37,13 +38,25 @@ sign_only() {
     fi
 }
 
+# bootctl update (the systemd-boot package runs it on every upgrade) adds
+# "Linux Boot Manager" and "Fallback Linux Boot Manager", which start
+# systemd-boot without shim. The "Ubuntu" entry (shim) is the only one kept.
+prune_entries() {
+    local num
+    for num in $(efibootmgr 2>/dev/null | sed -nE 's/^Boot([0-9A-Fa-f]{4})\*? (Fallback )?Linux Boot Manager[[:space:]].*/\1/p'); do
+        efibootmgr -q -b "$num" -B && log "Removed firmware entry Boot$num (Linux Boot Manager)"
+    done
+}
+
 case "${1:-}" in
     --sign-only) sign_only ;;
+    --prune) prune_entries ;;
     "")
         # Nothing to do until first boot has set systemd-boot up.
         [[ -e /var/lib/custom-iso/sdboot-installed ]] || exit 0
         sign_only && bootctl --graceful --esp-path="$ESP" --no-variables update >/dev/null 2>&1
+        prune_entries
         exit 0   # never fail an apt run
         ;;
-    *) echo "usage: $0 [--sign-only]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--sign-only|--prune]" >&2; exit 2 ;;
 esac

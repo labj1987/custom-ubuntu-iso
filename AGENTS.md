@@ -12,6 +12,7 @@ Builds a custom Ubuntu 26.10 desktop install ISO from the official image. `build
   - `custom-iso-laptop-power.service`: TLP on laptops, after the network is up.
   - `etc/xdg/autostart/custom-iso-firstlogin.desktop` + `firstlogin.sh`: per user. AppImages via Gear Lever, RDP login, NVIDIA hint.
 - `keys/`, `remmina-gpu/`: optional inputs (see README).
+- `tests/`: local VM tests under UEFI Secure Boot; `tests/README.md` has the procedure and latest results. ISOs and test disks stay local (`out/`, `work/`); never commit or upload them.
 
 ## Rules
 

@@ -125,7 +125,7 @@ EOF
     dd if="$W/esp.img" of="$W/disk.raw" bs=1M seek=1 conv=notrunc status=none
 
     cleanup; trap - EXIT
-    rm -f "$W"/*.squashfs "$W/esp.img"
+    rm -f "$W"/minimal*.squashfs "$W/esp.img"
     cp "$VARS_TEMPLATE" "$W/vars.fd"
     log "Disk ready: $W/disk.raw"
 }

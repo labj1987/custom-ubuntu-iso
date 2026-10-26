@@ -1,0 +1,538 @@
+diff --git a/plugins/rdp/CMakeLists.txt b/plugins/rdp/CMakeLists.txt
+index da4798b..0c78720 100644
+--- a/plugins/rdp/CMakeLists.txt
++++ b/plugins/rdp/CMakeLists.txt
+@@ -55,8 +55,26 @@ set(REMMINA_PLUGIN_RDP_SRCS
+     rdp_monitor.h
+     rdp_channels.c
+     rdp_channels.h
++    rdp_relmouse.c
++    rdp_relmouse.h
+     )
+ 
++# Relative mouse input on Wayland (rdp_relmouse.c): client code for the pointer-constraints and
++# relative-pointer protocols, generated from wayland-protocols.
++if(wayland-client_FOUND)
++    find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
++    pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
++    foreach(proto pointer-constraints relative-pointer)
++        set(xml "${WAYLAND_PROTOCOLS_DIR}/unstable/${proto}/${proto}-unstable-v1.xml")
++        set(header "${CMAKE_CURRENT_BINARY_DIR}/${proto}-unstable-v1-client-protocol.h")
++        set(code "${CMAKE_CURRENT_BINARY_DIR}/${proto}-unstable-v1-protocol.c")
++        add_custom_command(OUTPUT "${header}" COMMAND ${WAYLAND_SCANNER} client-header "${xml}" "${header}" DEPENDS "${xml}")
++        add_custom_command(OUTPUT "${code}" COMMAND ${WAYLAND_SCANNER} private-code "${xml}" "${code}" DEPENDS "${xml}")
++        list(APPEND REMMINA_PLUGIN_RDP_SRCS "${header}" "${code}")
++    endforeach()
++    include_directories(${CMAKE_CURRENT_BINARY_DIR})
++endif()
++
+ add_definitions(-DFREERDP_REQUIRED_MAJOR=${FREERDP_REQUIRED_MAJOR})
+ add_definitions(-DFREERDP_REQUIRED_MINOR=${FREERDP_REQUIRED_MINOR})
+ add_definitions(-DFREERDP_REQUIRED_REVISION=${FREERDP_REQUIRED_REVISION})
+diff --git a/plugins/rdp/rdp_event.c b/plugins/rdp/rdp_event.c
+index 59f51c9..eecb780 100644
+--- a/plugins/rdp/rdp_event.c
++++ b/plugins/rdp/rdp_event.c
+@@ -40,6 +40,7 @@
+ #include "rdp_cliprdr.h"
+ #include "rdp_event.h"
+ #include "rdp_monitor.h"
++#include "rdp_relmouse.h"
+ #include "rdp_settings.h"
+ #include <gdk/gdkkeysyms.h>
+ #ifdef GDK_WINDOWING_X11
+@@ -101,6 +102,18 @@ gboolean remmina_rdp_event_on_unmap(RemminaProtocolWidget *gp)
+ 	return FALSE;
+ }
+ 
++static gboolean remmina_rdp_event_on_relmouse_focus_in(GtkWidget *widget, GdkEventFocus *event, RemminaProtocolWidget *gp)
++{
++	remmina_rdp_relmouse_set_focus(gp, TRUE);
++	return FALSE;
++}
++
++static gboolean remmina_rdp_event_on_relmouse_focus_out(GtkWidget *widget, GdkEventFocus *event, RemminaProtocolWidget *gp)
++{
++	remmina_rdp_relmouse_set_focus(gp, FALSE);
++	return FALSE;
++}
++
+ static gboolean remmina_rdp_event_on_focus_in(GtkWidget *widget, GdkEventKey *event, RemminaProtocolWidget *gp)
+ {
+ 	TRACE_CALL(__func__);
+@@ -619,6 +632,11 @@ static gboolean remmina_rdp_event_on_motion(GtkWidget *widget, GdkEventMotion *e
+ 	if (remmina_plugin_service->file_get_int(remminafile, "viewonly", FALSE))
+ 		return FALSE;
+ 
++	/* While the pointer is locked for relative input, only its relative motion moves the remote one. */
++	remmina_rdp_relmouse_poke(gp);
++	if (remmina_rdp_relmouse_active(gp))
++		return TRUE;
++
+ 	rdp_event.type = REMMINA_RDP_EVENT_TYPE_MOUSE;
+ 	rdp_event.mouse_event.flags = PTR_FLAGS_MOVE;
+ 	rdp_event.mouse_event.extended = FALSE;
+@@ -693,6 +711,17 @@ static gboolean remmina_rdp_event_on_button(GtkWidget *widget, GdkEventButton *e
+ 			flag |= PTR_FLAGS_DOWN;
+ 	}
+ 
++	/* Relative mode: a button with no position, so the remote pointer stays where the game put it. The
++	 * relative pointer event carries the extended buttons with the same down flag as the others. */
++	if (flag != 0 && remmina_rdp_relmouse_active(gp)) {
++		if (extended && (flag & PTR_XFLAGS_DOWN))
++			flag = (flag & ~PTR_XFLAGS_DOWN) | PTR_FLAGS_DOWN;
++		rdp_event.type = REMMINA_RDP_EVENT_TYPE_MOUSE_REL;
++		rdp_event.mouse_rel_event.flags = flag;
++		remmina_rdp_event_event_push(gp, &rdp_event);
++		return TRUE;
++	}
++
+ 	rdp_event.type = REMMINA_RDP_EVENT_TYPE_MOUSE;
+ 	remmina_rdp_event_translate_pos(gp, event->x, event->y, &rdp_event.mouse_event.x, &rdp_event.mouse_event.y);
+ 
+@@ -1061,6 +1090,11 @@ void remmina_rdp_event_init(RemminaProtocolWidget *gp)
+ 			 G_CALLBACK(remmina_rdp_event_on_key), gp);
+ 	g_signal_connect(G_OBJECT(rfi->drawing_area), "focus-in-event",
+ 			 G_CALLBACK(remmina_rdp_event_on_focus_in), gp);
++	g_signal_connect(G_OBJECT(rfi->drawing_area), "focus-in-event",
++			 G_CALLBACK(remmina_rdp_event_on_relmouse_focus_in), gp);
++	g_signal_connect(G_OBJECT(rfi->drawing_area), "focus-out-event",
++			 G_CALLBACK(remmina_rdp_event_on_relmouse_focus_out), gp);
++	remmina_rdp_relmouse_init(gp);
+ 	/** Fixme: This comment
+ 	 * needed for TS_SUPPRESS_OUTPUT_PDU
+ 	 * But it works only when we stay in the same window mode, if we switch to
+@@ -1132,6 +1166,8 @@ void remmina_rdp_event_uninit(RemminaProtocolWidget *gp)
+ 
+ 	if (!rfi) return;
+ 
++	remmina_rdp_relmouse_free(gp);
++
+ 	/* unregister the clipboard monitor */
+ 	if (rfi->clipboard.clipboard_handler) {
+ 		g_signal_handler_disconnect(G_OBJECT(gtk_widget_get_clipboard(rfi->drawing_area, GDK_SELECTION_CLIPBOARD)), rfi->clipboard.clipboard_handler);
+@@ -1292,6 +1328,15 @@ static BOOL remmina_rdp_event_create_cursor(RemminaProtocolWidget *gp, RemminaPl
+ 		return FALSE;
+ 	}
+ 
++	/* A cursor image with nothing visible hides the remote cursor as well as a null pointer does. */
++	((rfPointer *)ui->cursor.pointer)->transparent = TRUE;
++	for (UINT32 i = 0; i < pointer->width * pointer->height; i++) {
++		if (data[i * 4 + 3] != 0) {
++			((rfPointer *)ui->cursor.pointer)->transparent = FALSE;
++			break;
++		}
++	}
++
+ 	surface = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32, pointer->width, pointer->height, cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, pointer->width));
+ 	cairo_surface_flush(surface);
+ 	pixbuf = gdk_pixbuf_get_from_surface(surface, 0, 0, pointer->width, pointer->height);
+@@ -1365,6 +1410,7 @@ static void remmina_rdp_event_cursor(RemminaProtocolWidget *gp, RemminaPluginRdp
+ 
+ 	case REMMINA_RDP_POINTER_SET:
+ 		gdk_window_set_cursor(gtk_widget_get_window(rfi->drawing_area), ui->cursor.pointer->cursor);
++		remmina_rdp_relmouse_set_remote_hidden(gp, ui->cursor.pointer->transparent);
+ 		ui->retval = 1;
+ 		break;
+ 
+@@ -1378,12 +1424,14 @@ static void remmina_rdp_event_cursor(RemminaProtocolWidget *gp, RemminaPluginRdp
+ 		GdkCursor* cursor = gdk_cursor_new_for_display(gdk_display_get_default(), GDK_BLANK_CURSOR);
+ 		gdk_window_set_cursor(da, cursor);
+ 		g_object_unref(cursor);
++		remmina_rdp_relmouse_set_remote_hidden(gp, TRUE);
+ 		ui->retval = 1;
+ 	}
+ 		break;
+ 
+ 	case REMMINA_RDP_POINTER_DEFAULT:
+ 		gdk_window_set_cursor(gtk_widget_get_window(rfi->drawing_area), NULL);
++		remmina_rdp_relmouse_set_remote_hidden(gp, FALSE);
+ 		ui->retval = 1;
+ 		break;
+ 	}
+diff --git a/plugins/rdp/rdp_plugin.c b/plugins/rdp/rdp_plugin.c
+index 127198a..c7d2fc0 100644
+--- a/plugins/rdp/rdp_plugin.c
++++ b/plugins/rdp/rdp_plugin.c
+@@ -298,6 +298,12 @@ static BOOL rf_process_event_queue(RemminaProtocolWidget *gp)
+ 						  event->mouse_event.x, event->mouse_event.y);
+ 			break;
+ 
++		case REMMINA_RDP_EVENT_TYPE_MOUSE_REL:
++			if (freerdp_settings_get_bool(rfi->clientContext.context.settings, FreeRDP_HasRelativeMouseEvent))
++				freerdp_input_send_rel_mouse_event(input, event->mouse_rel_event.flags,
++								   event->mouse_rel_event.dx, event->mouse_rel_event.dy);
++			break;
++
+ 		case REMMINA_RDP_EVENT_TYPE_CLIPBOARD_SEND_CLIENT_FORMAT_LIST:
+ 			if(rfi->clipboard.context != NULL){
+ 				rfi->clipboard.context->ClientFormatList(rfi->clipboard.context, event->clipboard_formatlist.pFormatList);
+diff --git a/plugins/rdp/rdp_plugin.h b/plugins/rdp/rdp_plugin.h
+index 6276a5e..8f82683 100644
+--- a/plugins/rdp/rdp_plugin.h
++++ b/plugins/rdp/rdp_plugin.h
+@@ -156,6 +156,8 @@ typedef struct rf_clipboard rfClipboard;
+ struct rf_pointer {
+ 	rdpPointer	pointer;
+ 	GdkCursor *	cursor;
++	/* Every pixel of the image is transparent: the remote cursor is hidden (rdp_relmouse.h). */
++	gboolean	transparent;
+ };
+ typedef struct rf_pointer rfPointer;
+ 
+@@ -180,6 +182,7 @@ typedef enum {
+ 	REMMINA_RDP_EVENT_TYPE_SCANCODE,
+ 	REMMINA_RDP_EVENT_TYPE_SCANCODE_UNICODE,
+ 	REMMINA_RDP_EVENT_TYPE_MOUSE,
++	REMMINA_RDP_EVENT_TYPE_MOUSE_REL,
+ 	REMMINA_RDP_EVENT_TYPE_CLIPBOARD_SEND_CLIENT_FORMAT_LIST,
+ 	REMMINA_RDP_EVENT_TYPE_CLIPBOARD_SEND_CLIENT_FORMAT_DATA_RESPONSE,
+ 	REMMINA_RDP_EVENT_TYPE_CLIPBOARD_SEND_CLIENT_FORMAT_DATA_REQUEST,
+@@ -203,6 +206,11 @@ struct remmina_plugin_rdp_event {
+ 			UINT16	y;
+ 			BOOL	extended;
+ 		} mouse_event;
++		struct {
++			UINT16	flags;
++			INT16	dx;
++			INT16	dy;
++		} mouse_rel_event;
+ 		struct {
+ 			CLIPRDR_FORMAT_LIST *pFormatList;
+ 		} clipboard_formatlist;
+@@ -381,6 +389,9 @@ struct rf_context {
+ 	UINT16         	last_x;
+ 	UINT16         	last_y;
+ 
++	/* Relative mouse input while the remote cursor is hidden (rdp_relmouse.h). */
++	struct remmina_rdp_relmouse *relmouse;
++
+ 	rfClipboard		clipboard;
+ 
+ 	GArray *		keymap; /* Array of RemminaPluginRdpKeymapEntry */
+diff --git a/plugins/rdp/rdp_relmouse.c b/plugins/rdp/rdp_relmouse.c
+new file mode 100644
+index 0000000..9961838
+--- /dev/null
++++ b/plugins/rdp/rdp_relmouse.c
+@@ -0,0 +1,281 @@
++/*
++ * Remmina - The GTK+ Remote Desktop Client
++ *
++ * Relative mouse input for games (see rdp_relmouse.h).
++ *
++ * This program is free software; you can redistribute it and/or modify it under the terms of the
++ * GNU General Public License as published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version, with the OpenSSL exception of the rest of Remmina.
++ */
++
++#include "rdp_relmouse.h"
++#include "rdp_event.h"
++
++#include <math.h>
++
++#ifdef GDK_WINDOWING_WAYLAND
++#include <gdk/gdkwayland.h>
++#include "pointer-constraints-unstable-v1-client-protocol.h"
++#include "relative-pointer-unstable-v1-client-protocol.h"
++#endif
++
++struct remmina_rdp_relmouse {
++	RemminaProtocolWidget *gp;
++	gboolean remote_hidden;
++	gboolean focused;
++	gboolean active;
++	gboolean said;
++#ifdef GDK_WINDOWING_WAYLAND
++	struct wl_display *display;
++	struct zwp_relative_pointer_manager_v1 *relative_manager;
++	struct zwp_pointer_constraints_v1 *constraints;
++	struct zwp_relative_pointer_v1 *relative;
++	struct zwp_locked_pointer_v1 *locked;
++	/* Sub-unit motion carried to the next event, so slow movement is not lost to rounding. */
++	double rest_x, rest_y;
++#endif
++};
++
++static RemminaRdpRelMouse *get(RemminaProtocolWidget *gp)
++{
++	rfContext *rfi = GET_PLUGIN_DATA(gp);
++	return rfi ? rfi->relmouse : NULL;
++}
++
++#ifdef GDK_WINDOWING_WAYLAND
++
++static void push_motion(RemminaRdpRelMouse *rm, gint dx, gint dy)
++{
++	RemminaPluginRdpEvent rdp_event = { 0 };
++
++	rdp_event.type = REMMINA_RDP_EVENT_TYPE_MOUSE_REL;
++	rdp_event.mouse_rel_event.flags = PTR_FLAGS_MOVE;
++	rdp_event.mouse_rel_event.dx = (INT16)CLAMP(dx, G_MININT16, G_MAXINT16);
++	rdp_event.mouse_rel_event.dy = (INT16)CLAMP(dy, G_MININT16, G_MAXINT16);
++	remmina_rdp_event_event_push(rm->gp, &rdp_event);
++}
++
++static void relative_motion(void *data, struct zwp_relative_pointer_v1 *relative, uint32_t utime_hi, uint32_t utime_lo,
++			    wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t dx_unaccel, wl_fixed_t dy_unaccel)
++{
++	RemminaRdpRelMouse *rm = data;
++
++	(void)relative; (void)utime_hi; (void)utime_lo; (void)dx; (void)dy;
++	if (!rm->active)
++		return;
++	/* The device's own motion, without the local desktop's acceleration: what a mouse plugged into
++	 * the server would report, and what the server's own pointer settings then apply to. */
++	rm->rest_x += wl_fixed_to_double(dx_unaccel);
++	rm->rest_y += wl_fixed_to_double(dy_unaccel);
++	gint ix = (gint)trunc(rm->rest_x);
++	gint iy = (gint)trunc(rm->rest_y);
++	if (ix == 0 && iy == 0)
++		return;
++	rm->rest_x -= ix;
++	rm->rest_y -= iy;
++	push_motion(rm, ix, iy);
++}
++
++static const struct zwp_relative_pointer_v1_listener relative_listener = {
++	.relative_motion = relative_motion,
++};
++
++static void registry_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
++{
++	RemminaRdpRelMouse *rm = data;
++
++	(void)version;
++	if (g_strcmp0(interface, zwp_relative_pointer_manager_v1_interface.name) == 0)
++		rm->relative_manager = wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1);
++	else if (g_strcmp0(interface, zwp_pointer_constraints_v1_interface.name) == 0)
++		rm->constraints = wl_registry_bind(registry, name, &zwp_pointer_constraints_v1_interface, 1);
++}
++
++static void registry_global_remove(void *data, struct wl_registry *registry, uint32_t name)
++{
++	(void)data; (void)registry; (void)name;
++}
++
++static const struct wl_registry_listener registry_listener = {
++	.global = registry_global,
++	.global_remove = registry_global_remove,
++};
++
++static void bind_globals(RemminaRdpRelMouse *rm)
++{
++	GdkDisplay *display = gdk_display_get_default();
++
++	if (!GDK_IS_WAYLAND_DISPLAY(display))
++		return;
++	rm->display = gdk_wayland_display_get_wl_display(display);
++	/* A private queue for the registry round trip, so GDK's own events are not dispatched from here. */
++	struct wl_event_queue *queue = wl_display_create_queue(rm->display);
++	struct wl_display *wrapped = wl_proxy_create_wrapper(rm->display);
++	wl_proxy_set_queue((struct wl_proxy *)wrapped, queue);
++	struct wl_registry *registry = wl_display_get_registry(wrapped);
++	wl_registry_add_listener(registry, &registry_listener, rm);
++	wl_display_roundtrip_queue(rm->display, queue);
++	wl_registry_destroy(registry);
++	wl_proxy_wrapper_destroy(wrapped);
++	/* The objects made from these go on GDK's default queue, which GTK's main loop dispatches. */
++	if (rm->relative_manager)
++		wl_proxy_set_queue((struct wl_proxy *)rm->relative_manager, NULL);
++	if (rm->constraints)
++		wl_proxy_set_queue((struct wl_proxy *)rm->constraints, NULL);
++	wl_event_queue_destroy(queue);
++}
++
++static gboolean lock_pointer(RemminaRdpRelMouse *rm)
++{
++	rfContext *rfi = GET_PLUGIN_DATA(rm->gp);
++	GdkDisplay *display = gdk_display_get_default();
++	GdkDevice *pointer = gdk_seat_get_pointer(gdk_display_get_default_seat(display));
++	GtkWidget *toplevel;
++	GdkWindow *window;
++	struct wl_pointer *wl_pointer;
++	struct wl_surface *surface;
++
++	if (!rfi || !rfi->drawing_area || !rm->relative_manager || !rm->constraints || !pointer)
++		return FALSE;
++	toplevel = gtk_widget_get_toplevel(rfi->drawing_area);
++	window = toplevel ? gtk_widget_get_window(toplevel) : NULL;
++	if (!window || !GDK_IS_WAYLAND_WINDOW(window))
++		return FALSE;
++	wl_pointer = gdk_wayland_device_get_wl_pointer(pointer);
++	surface = gdk_wayland_window_get_wl_surface(window);
++	if (!wl_pointer || !surface)
++		return FALSE;
++	rm->locked = zwp_pointer_constraints_v1_lock_pointer(rm->constraints, surface, wl_pointer, NULL,
++							     ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT);
++	rm->relative = zwp_relative_pointer_manager_v1_get_relative_pointer(rm->relative_manager, wl_pointer);
++	zwp_relative_pointer_v1_add_listener(rm->relative, &relative_listener, rm);
++	rm->rest_x = rm->rest_y = 0.0;
++	wl_display_flush(rm->display);
++	return TRUE;
++}
++
++static void unlock_pointer(RemminaRdpRelMouse *rm)
++{
++	if (rm->relative) {
++		zwp_relative_pointer_v1_destroy(rm->relative);
++		rm->relative = NULL;
++	}
++	if (rm->locked) {
++		zwp_locked_pointer_v1_destroy(rm->locked);
++		rm->locked = NULL;
++	}
++	if (rm->display)
++		wl_display_flush(rm->display);
++}
++
++#endif
++
++/* Relative mode is wanted while the remote cursor is hidden, the session has the focus, the server
++ * announced relative mouse input, and the profile has not turned it off. */
++static void update(RemminaRdpRelMouse *rm)
++{
++	rfContext *rfi = GET_PLUGIN_DATA(rm->gp);
++	RemminaFile *remminafile = remmina_plugin_service->protocol_plugin_get_file(rm->gp);
++	gboolean server = rfi && rfi->connected &&
++			  freerdp_settings_get_bool(rfi->clientContext.context.settings, FreeRDP_HasRelativeMouseEvent);
++	gboolean allowed = !remmina_plugin_service->file_get_int(remminafile, "disable-relative-mouse", FALSE) &&
++			   !remmina_plugin_service->file_get_int(remminafile, "viewonly", FALSE);
++	gboolean want = rm->remote_hidden && rm->focused && server && allowed;
++
++	if (want == rm->active)
++		return;
++#ifdef GDK_WINDOWING_WAYLAND
++	if (want) {
++		if (!lock_pointer(rm)) {
++			if (!rm->said) {
++				rm->said = TRUE;
++				g_message("[RDP] relative mouse: no Wayland pointer lock available; the mouse stays absolute");
++			}
++			unlock_pointer(rm);
++			return;
++		}
++		rm->active = TRUE;
++		REMMINA_PLUGIN_DEBUG("relative mouse on (remote cursor hidden)");
++	} else {
++		rm->active = FALSE;
++		unlock_pointer(rm);
++		REMMINA_PLUGIN_DEBUG("relative mouse off");
++	}
++#else
++	if (want && !rm->said) {
++		rm->said = TRUE;
++		g_message("[RDP] relative mouse: only supported on Wayland; the mouse stays absolute");
++	}
++#endif
++}
++
++void remmina_rdp_relmouse_init(RemminaProtocolWidget *gp)
++{
++	rfContext *rfi = GET_PLUGIN_DATA(gp);
++	RemminaRdpRelMouse *rm;
++
++	if (!rfi || rfi->relmouse)
++		return;
++	rm = g_new0(RemminaRdpRelMouse, 1);
++	rm->gp = gp;
++	rm->focused = TRUE;
++#ifdef GDK_WINDOWING_WAYLAND
++	bind_globals(rm);
++#endif
++	rfi->relmouse = rm;
++}
++
++void remmina_rdp_relmouse_free(RemminaProtocolWidget *gp)
++{
++	rfContext *rfi = GET_PLUGIN_DATA(gp);
++	RemminaRdpRelMouse *rm = rfi ? rfi->relmouse : NULL;
++
++	if (!rm)
++		return;
++#ifdef GDK_WINDOWING_WAYLAND
++	unlock_pointer(rm);
++	if (rm->relative_manager)
++		zwp_relative_pointer_manager_v1_destroy(rm->relative_manager);
++	if (rm->constraints)
++		zwp_pointer_constraints_v1_destroy(rm->constraints);
++	if (rm->display)
++		wl_display_flush(rm->display);
++#endif
++	rfi->relmouse = NULL;
++	g_free(rm);
++}
++
++void remmina_rdp_relmouse_set_remote_hidden(RemminaProtocolWidget *gp, gboolean hidden)
++{
++	RemminaRdpRelMouse *rm = get(gp);
++
++	if (!rm)
++		return;
++	rm->remote_hidden = hidden;
++	update(rm);
++}
++
++void remmina_rdp_relmouse_set_focus(RemminaProtocolWidget *gp, gboolean focused)
++{
++	RemminaRdpRelMouse *rm = get(gp);
++
++	if (!rm)
++		return;
++	rm->focused = focused;
++	update(rm);
++}
++
++void remmina_rdp_relmouse_poke(RemminaProtocolWidget *gp)
++{
++	RemminaRdpRelMouse *rm = get(gp);
++
++	if (rm && rm->remote_hidden && !rm->active)
++		update(rm);
++}
++
++gboolean remmina_rdp_relmouse_active(RemminaProtocolWidget *gp)
++{
++	RemminaRdpRelMouse *rm = get(gp);
++
++	return rm && rm->active;
++}
+diff --git a/plugins/rdp/rdp_relmouse.h b/plugins/rdp/rdp_relmouse.h
+new file mode 100644
+index 0000000..9efc855
+--- /dev/null
++++ b/plugins/rdp/rdp_relmouse.h
+@@ -0,0 +1,33 @@
++/*
++ * Remmina - The GTK+ Remote Desktop Client
++ *
++ * Relative mouse input for games: while the remote cursor is hidden (a game captured the mouse) and
++ * the server accepts relative mouse events, the local pointer is locked to the window and its raw
++ * motion is sent as RDP relative mouse events (TS_FP_RELPOINTER_EVENT) instead of absolute positions.
++ * A game that keeps its pointer centred (most of them, under Wine/Xwayland: the server's pointer is
++ * locked) only ever sees relative motion, so absolute positions alone never reach it.
++ *
++ * Wayland only (zwp_pointer_constraints_v1 + zwp_relative_pointer_v1); elsewhere it stays off.
++ *
++ * This program is free software; you can redistribute it and/or modify it under the terms of the
++ * GNU General Public License as published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version, with the OpenSSL exception of the rest of Remmina.
++ */
++
++#pragma once
++
++#include "rdp_plugin.h"
++
++typedef struct remmina_rdp_relmouse RemminaRdpRelMouse;
++
++/* Called on the GTK thread throughout. */
++void remmina_rdp_relmouse_init(RemminaProtocolWidget *gp);
++void remmina_rdp_relmouse_free(RemminaProtocolWidget *gp);
++/* The remote cursor was hidden (TRUE) or shown again (FALSE). */
++void remmina_rdp_relmouse_set_remote_hidden(RemminaProtocolWidget *gp, gboolean hidden);
++/* The session's widget gained (TRUE) or lost (FALSE) the keyboard focus. */
++void remmina_rdp_relmouse_set_focus(RemminaProtocolWidget *gp, gboolean focused);
++/* Re-checks whether relative mode is wanted (the server's support is only known once connected). */
++void remmina_rdp_relmouse_poke(RemminaProtocolWidget *gp);
++/* Relative mode is on: buttons go as relative events too. */
++gboolean remmina_rdp_relmouse_active(RemminaProtocolWidget *gp);

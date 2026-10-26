@@ -1,0 +1,33 @@
+diff --git a/libfreerdp/codec/h264_ffmpeg.c b/libfreerdp/codec/h264_ffmpeg.c
+index b64d0b4..6ea238d 100644
+--- a/libfreerdp/codec/h264_ffmpeg.c
++++ b/libfreerdp/codec/h264_ffmpeg.c
+@@ -597,23 +597,12 @@ EXCEPTION:
+ static int hw_supports_target_format(AVBufferRef* hwframectx, enum AVPixelFormat target)
+ {
+ 	WINPR_ASSERT(hwframectx);
++	WINPR_UNUSED(target);
+ 
+-	enum AVPixelFormat* formats = nullptr;
+-	int rc = av_hwframe_transfer_get_formats(hwframectx, AV_HWFRAME_TRANSFER_DIRECTION_FROM,
+-	                                         &formats, 0);
+-	if (rc == 0)
+-	{
+-		enum AVPixelFormat* it = formats;
+-		while ((rc == 0) && (*it != AV_PIX_FMT_NONE))
+-		{
+-			enum AVPixelFormat cur = *it++;
+-			if (cur == target)
+-				rc = 1;
+-		}
+-	}
+-
+-	av_free(formats);
+-	return rc;
++	/* Never let the driver convert during download: fetch the native surface format
++	 * (NV12) and convert with swscale. Driver-side conversion in vaGetImage segfaults
++	 * on Intel iHD. */
++	return 0;
+ }
+ #endif
+ 

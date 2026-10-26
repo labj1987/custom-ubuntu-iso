@@ -138,11 +138,13 @@ fi
 
 # ── 5. Size and manifest of the finished install ──────────────────────────
 in_chroot dpkg-query -W --showformat='${Package}\t${Version}\n' > "$WORK/$LAYER.manifest"
-SIZE="$(du -sxb "$ROOT" --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run | cut -f1)"
+rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/*.bin "$ROOT"/var/cache/apt/archives/*.deb
+SIZE="$(du -sb "$ROOT/" --exclude=proc --exclude=sys --exclude=dev --exclude=run | cut -f1)"
 
 # ── 6. Remove the build-only settings ─────────────────────────────────────
 log "Removing build-only settings"
-rm -rf "$ROOT/tmp/build" "$ROOT/etc/apt/apt.conf.d/00build-proxy" "$ROOT/usr/sbin/policy-rc.d"
+rm -rf "$ROOT/tmp/build" "$ROOT/etc/apt/apt.conf.d/00build-proxy" "$ROOT/usr/sbin/policy-rc.d" \
+    "$ROOT/root/src" "$ROOT/root/.cache" "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/*.bin "$ROOT"/var/cache/apt/archives/*.deb
 mv "$STASH/cdrom.sources" "$ROOT/etc/apt/sources.list.d/"
 cleanup; trap - EXIT
 

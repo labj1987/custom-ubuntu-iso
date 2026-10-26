@@ -23,3 +23,10 @@ Builds a custom Ubuntu 26.10 desktop install ISO from the official image. `build
 - shim on the ESP and the "Ubuntu" entry belong to the systemd-boot package (its `install_shim`, run by `dpkg-reconfigure systemd-boot` at first boot and by shim updates). It expects Debian's `fbx64.efi.signed`/`mmx64.efi.signed`; the image links them to Ubuntu's signed `fbx64.efi`/`mmx64.efi`, without which it fails and leaves no MOK Manager on the ESP.
 - "Ubuntu" is the only firmware boot entry. `bootctl update` (run by every systemd-boot upgrade) re-adds "Linux Boot Manager"/"Fallback Linux Boot Manager", which skip shim; `sdboot-sign.sh --prune` removes them at first boot and after every apt run.
 - No backward compatibility code; the only user is the author.
+
+## Shared memory
+
+The owner's Claude sessions (local, cloud and chat) share notes in the Google Drive folder "Claude Memory", one doc per topic; this repo's doc is "project: custom-ubuntu-iso". If you have the Google Drive connector:
+
+- Before starting work, read that doc and the "prefs:" docs for decisions, things already tried or ruled out, and the release state.
+- After meaningful work (a release, a decision, a failed attempt worth not repeating, an open issue), update the doc. The connector can't edit a doc's text: create a replacement doc with the same title in that folder, then trash the old one. The folder's "README - how this folder works" doc has the conventions.

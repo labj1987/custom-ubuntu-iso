@@ -7,7 +7,8 @@
 #  3. systemd-boot as the default boot entry, loaded through shim and signed
 #     with Kernel Pop's kernel-signing key (same key, same location, so one
 #     MOK enrollment covers the boot loader and Kernel Pop's kernels).
-#     GRUB stays installed behind it as a fallback entry.
+#     It becomes the default boot entry only after the key is enrolled (or
+#     right away with Secure Boot off); until then GRUB keeps booting.
 #  4. GNOME Remote Desktop "Remote Login" (port 3389): TLS certificate and
 #     enabled; the login itself is set at first user login.
 #  5. With Secure Boot on: queue the key for enrollment and reboot once into
@@ -117,15 +118,40 @@ EOF
             && log "Boot entry added for $k" || log "WARNING: kernel-install failed for $k"
     done
 
-    # shim + signed systemd-boot in EFI/systemd, and a firmware entry first in line.
+    # shim + signed systemd-boot in EFI/systemd, and a firmware entry for it.
+    # The entry goes LAST in the boot order: shim refuses this systemd-boot
+    # until its key is enrolled, and the firmware does not fall back after
+    # that refusal. promote_sdboot moves it first once the key is trusted.
     /usr/local/lib/custom-iso/sdboot-sign.sh --refresh-esp || return 1
-    if ! efibootmgr | grep -q "Ubuntu (systemd-boot)"; then
+    if [[ -z "$(sdboot_entry)" ]]; then
+        local order; order="$(efibootmgr | awk -F': ' '/^BootOrder:/ {print $2}')"
         read -r disk part <<< "$(esp_disk_and_part)"
         efibootmgr -q -c -d "$disk" -p "$part" -L "Ubuntu (systemd-boot)" -l '\EFI\systemd\shimx64.efi' \
-            && log "Firmware boot entry created on $disk partition $part (first in boot order)" \
             || { log "ERROR: efibootmgr could not create the boot entry"; return 1; }
+        [[ -n "$order" ]] && efibootmgr -q -o "$order,$(sdboot_entry)"
+        log "Firmware boot entry created on $disk partition $part (after GRUB until the key is enrolled)"
     fi
     done_mark sdboot-installed
+}
+
+sdboot_entry() { efibootmgr | awk '/Ubuntu \(systemd-boot\)/ {sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1; exit}'; }
+
+key_trusted() {
+    ! secure_boot_on && return 0
+    mokutil --test-key "$MOK_DIR/signing.der" 2>/dev/null | grep -qiE "already enrolled|already in db|built-in"
+}
+
+# systemd-boot becomes the default only once shim will accept it.
+promote_sdboot() {
+    is_done sdboot-default && return 0
+    is_done sdboot-installed || return 0
+    key_trusted || { log "Signing key not enrolled yet: GRUB stays the default boot entry"; return 0; }
+    local id order rest
+    id="$(sdboot_entry)"; [[ -n "$id" ]] || { log "WARNING: systemd-boot firmware entry missing"; return 0; }
+    order="$(efibootmgr | awk -F': ' '/^BootOrder:/ {print $2}')"
+    rest="$(tr ',' '\n' <<< "$order" | grep -vx "$id" | paste -sd, -)"
+    efibootmgr -q -o "$id${rest:+,$rest}" \
+        && { log "systemd-boot is now the default boot entry"; done_mark sdboot-default; }
 }
 
 secure_boot_on() { mokutil --sb-state 2>/dev/null | grep -q "SecureBoot enabled"; }
@@ -172,8 +198,11 @@ setup_remote_login() {
 setup_systemd_boot || log "systemd-boot setup failed; GRUB still boots this system. Retried next boot."
 setup_remote_login
 is_done sdboot-installed && queue_mok
+promote_sdboot
 
-if is_done sdboot-installed && is_done mok-queued && is_done remote-login; then
+# Runs every boot until everything, including the switch to systemd-boot
+# after enrollment, is done.
+if is_done sdboot-default && is_done mok-queued && is_done remote-login; then
     done_mark firstboot-done
 fi
 

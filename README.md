@@ -18,7 +18,7 @@ A rebuild of the official Ubuntu 26.10 desktop image that installs a ready-to-us
 Boot the ISO and install as usual. Then:
 
 1. **First boot.** Before the login screen, the system sets up systemd-boot and, with Secure Boot on, reboots once by itself.
-2. **Blue MOK Manager screen.** Choose *Enroll MOK*, *Continue*, *Yes*, then type the one-time password **`enrollmok`** and reboot. This enrolls the key that signs systemd-boot. If the screen is skipped, the computer still boots through GRUB, and Kernel Pop's signing setup can enroll the key later.
+2. **Blue MOK Manager screen.** Press a key within its 10-second countdown, then choose *Enroll MOK*, *Continue*, *Yes*, type the one-time password **`enrollmok`** and reboot. This enrolls the key that signs systemd-boot; on the next boot systemd-boot becomes the default. Until the key is enrolled the computer keeps booting through GRUB, and the screen comes back on the next reboot.
 3. **First login.** The four AppImage apps download and install in the background. A window asks for the remote desktop username and password (used for both ports). On a computer with an NVIDIA GPU, a notification points to Green Light for the driver.
 4. **Sign in** to Tailscale (`tailscale up`), Claude desktop and Steam.
 

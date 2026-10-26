@@ -43,7 +43,7 @@ seed() {
 }
 
 qemu() {
-    qemu-system-x86_64 -machine q35,smm=on -accel "$ACCEL" -cpu max -smp "$(nproc)" -m 6144 \
+    qemu-system-x86_64 -machine q35,smm=on -accel "$ACCEL" -cpu max -smp "$(nproc)" -m "${VM_MEM:-4096}" \
         -global driver=cfi.pflash01,property=secure,value=on \
         -drive if=pflash,format=raw,unit=0,file="$CODE",readonly=on \
         -drive if=pflash,format=raw,unit=1,file="$VM/vars.fd" \

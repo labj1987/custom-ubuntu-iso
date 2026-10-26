@@ -198,10 +198,11 @@ for pair in "$WORK/$LAYER.squashfs:/casper/$LAYER.squashfs" "$WORK/$LAYER.size:/
 done
 
 RM_ARGS=()
-for f in "${RM[@]}"; do [[ -n "$f" ]] && RM_ARGS+=(-rm "$f"); done
+for f in "${RM[@]}"; do [[ -n "$f" ]] && RM_ARGS+=("$f"); done
 rm -f "$OUT"
+# -rm takes every path up to "--".
 xorriso -indev "$ISO" -outdev "$OUT" -boot_image any replay \
-    "${RM_ARGS[@]}" \
+    -rm "${RM_ARGS[@]}" -- \
     -map "$WORK/$LAYER.squashfs" "/casper/$LAYER.squashfs" \
     -map "$WORK/$LAYER.size" "/casper/$LAYER.size" \
     -map "$WORK/$LAYER.manifest" "/casper/$LAYER.manifest" \

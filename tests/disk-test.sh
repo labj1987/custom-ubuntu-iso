@@ -13,6 +13,12 @@
 # Optional, for a host behind an HTTPS proxy (test VM only, never the ISO):
 #   TEST_PROXY=http://10.0.2.2:PORT TEST_CA=/path/ca.pem
 set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+# Mounts live in a private mount namespace: nothing propagates to the host or
+# to other namespaces (services, Flatpak/Steam sandboxes), and all of them go
+# away when the script exits.
+[[ -n "${CUSTOM_ISO_PRIVATE_MOUNTS:-}" ]] \
+    || CUSTOM_ISO_PRIVATE_MOUNTS=1 exec unshare --mount --propagation private "$0" "$@"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="${DISKTEST_DIR:-$HERE/../work/disktest}"
 mkdir -p "$W"

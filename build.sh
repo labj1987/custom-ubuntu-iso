@@ -16,6 +16,13 @@
 # records, minus the layers nothing uses any more.
 set -euo pipefail
 
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+# Mounts live in a private mount namespace: nothing propagates to the host or
+# to other namespaces (services, Flatpak/Steam sandboxes), and all of them go
+# away when the script exits.
+[[ -n "${CUSTOM_ISO_PRIVATE_MOUNTS:-}" ]] \
+    || CUSTOM_ISO_PRIVATE_MOUNTS=1 exec unshare --mount --propagation private "$0" "$@"
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RELEASE=26.10
 BASE_URL="https://releases.ubuntu.com/$RELEASE"
@@ -35,7 +42,6 @@ while (( $# )); do
     esac
 done
 
-[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 for t in xorriso mksquashfs unsquashfs gpg curl; do
     command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }
 done
@@ -113,8 +119,9 @@ in_chroot() { chroot "$ROOT" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin 
 
 # ── 4. Files, then the customization ─────────────────────────────────────
 log "Copying the image's own files"
-cp -a "$HERE/rootfs/." "$ROOT/"
-chown -R root:root "$ROOT/etc/sudoers.d" "$ROOT/usr/local/lib/custom-iso"
+# Files belong to root in the image, whoever owns the checkout (a user-owned
+# /etc makes sudo refuse to run).
+cp -a --no-preserve=ownership "$HERE/rootfs/." "$ROOT/"
 chmod 0440 "$ROOT/etc/sudoers.d/90-sudo-nopasswd"
 chmod 0755 "$ROOT"/usr/local/lib/custom-iso/*.sh
 if [[ -f "$HERE/keys/zerocool.pub" ]]; then
@@ -130,7 +137,7 @@ in_chroot /bin/bash /tmp/build/customize-chroot.sh
 
 if [[ -f "$HERE/remmina-gpu/build-in-chroot.sh" ]]; then
     log "Building GPU Remmina into /opt/remmina-gpu"
-    rm -rf "$ROOT/tmp/build/remmina-gpu"; cp -a "$HERE/remmina-gpu" "$ROOT/tmp/build/remmina-gpu"
+    rm -rf "$ROOT/tmp/build/remmina-gpu"; cp -a --no-preserve=ownership "$HERE/remmina-gpu" "$ROOT/tmp/build/remmina-gpu"
     in_chroot /bin/bash /tmp/build/remmina-gpu/build-in-chroot.sh
 else
     echo "WARNING: remmina-gpu/build-in-chroot.sh missing; GPU Remmina is not in this build" >&2

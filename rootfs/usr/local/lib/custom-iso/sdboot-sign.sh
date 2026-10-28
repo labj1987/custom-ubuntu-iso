@@ -46,11 +46,31 @@ sign_only() {
     fi
 }
 
+# "systemd-boot" in UTF-16LE: efibootmgr prints a load option as hex.
+SDBOOT_HEX="730079007300740065006d0064002d0062006f006f007400"
+
+# Whether a firmware entry starts shim with systemd-boot as its load option
+# (the "Ubuntu" entry), the same test as Kernel Pop's shim_sdboot_entries.
+have_shim_entry() {
+    local line lc
+    while IFS= read -r line; do
+        [[ "$line" =~ ^Boot[0-9A-Fa-f]{4}\*?[[:space:]] ]] || continue
+        lc="${line,,}"
+        # "\EFI\ubuntu\shimx64.efi", or "EFI\ubuntu\..." as install_shim makes it
+        [[ "$lc" == *'efi\ubuntu\shimx64.efi'* ]] || continue
+        [[ "$lc" == *'systemd-bootx64.efi'* || "$lc" == *"$SDBOOT_HEX"* ]] && return 0
+    done < <(efibootmgr 2>/dev/null)
+    return 1
+}
+
 # bootctl update (the systemd-boot package runs it on every upgrade) adds
 # "Linux Boot Manager" and "Fallback Linux Boot Manager", which start
-# systemd-boot without shim. The "Ubuntu" entry (shim) is the only one kept.
+# systemd-boot without shim. The "Ubuntu" entry (shim) is the only one kept,
+# and only while it exists: without it (a firmware reset, a failed
+# install_shim) they are the only Linux entries left.
 prune_entries() {
     local num
+    have_shim_entry || { log "No shim -> systemd-boot firmware entry: Linux Boot Manager entries are kept"; return 0; }
     for num in $(efibootmgr 2>/dev/null | sed -nE 's/^Boot([0-9A-Fa-f]{4})\*? (Fallback )?Linux Boot Manager[[:space:]].*/\1/p'); do
         efibootmgr -q -b "$num" -B && log "Removed firmware entry Boot$num (Linux Boot Manager)"
     done

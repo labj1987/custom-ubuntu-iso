@@ -5,8 +5,12 @@
 set -euo pipefail
 
 PREFIX=/opt/remmina-gpu
+# Tags name the release; the commit is what is checked out, so a moved tag
+# cannot change what gets built.
 FREERDP_TAG=3.32.0
+FREERDP_COMMIT=d27a4f7c1c63b62a5e60e5d939ad116cfb58ffc1
 REMMINA_TAG=v1.4.43
+REMMINA_COMMIT=7be0cf2348d149c6bf5bd882fe91d3bec7d6aebb
 SRC=$HOME/src/remmina-gpu
 JOBS=$(nproc)
 
@@ -37,8 +41,18 @@ fi
 
 log "fetching sources"
 mkdir -p "$SRC" && cd "$SRC"
-[ -d FreeRDP ] || git clone -q --depth 1 --branch "$FREERDP_TAG" https://github.com/FreeRDP/FreeRDP.git
-[ -d Remmina ] || git clone -q --depth 1 --branch "$REMMINA_TAG" https://gitlab.com/Remmina/Remmina.git
+# fetch_pinned DIR URL TAG COMMIT: the tag's tree, refused unless it is COMMIT.
+fetch_pinned() {
+  local dir="$1" url="$2" tag="$3" commit="$4" have
+  [ -d "$dir" ] || git clone -q --depth 1 --branch "$tag" "$url" "$dir"
+  have="$(git -C "$dir" rev-parse 'HEAD^{commit}')"
+  if [ "$have" != "$commit" ]; then
+    echo "$dir: $tag is $have, expected $commit" >&2
+    exit 1
+  fi
+}
+fetch_pinned FreeRDP https://github.com/FreeRDP/FreeRDP.git "$FREERDP_TAG" "$FREERDP_COMMIT"
+fetch_pinned Remmina https://gitlab.com/Remmina/Remmina.git "$REMMINA_TAG" "$REMMINA_COMMIT"
 
 PATCH="$(dirname "$(readlink -f "$0")")/freerdp-hwaccel-nv12-download.patch"
 if ! git -C FreeRDP apply --reverse --check "$PATCH" 2>/dev/null; then

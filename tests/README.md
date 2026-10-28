@@ -24,7 +24,7 @@ sudo tests/disk-test.sh boot &
 sudo tests/mok-enroll.sh
 ```
 
-First boot logs these `[custom-iso]` lines to the serial console, in order: SSH host keys ready; created the signing key; signed systemd-boot; GRUB removed; boot entry added; removed firmware entry (Linux Boot Manager), twice; systemd-boot installed behind shim; Remote Login set up on port 3389; key queued; rebooting into MOK Manager.
+First boot logs these `[custom-iso]` lines to the serial console, in order: SSH host keys ready; created the signing key; signed systemd-boot; GRUB packages replaced; boot entry added; removed firmware entry (Linux Boot Manager), twice; systemd-boot installed behind shim, "Ubuntu" first in the boot order; GRUB removed; Remote Login set up on port 3389; key queued; rebooting into MOK Manager.
 
 Then over SSH:
 
@@ -42,7 +42,20 @@ Then over SSH:
   Then ports 3389 and 3390 both listen. Check a login through an SSH tunnel (`-L 13389:127.0.0.1:3389 -L 13390:127.0.0.1:3390`) with `/opt/remmina-gpu/bin/xfreerdp /v:127.0.0.1:13390 /u:USER /p:PASS /cert:ignore +auth-only`.
 - Skipping MOK Manager (let the 10 s countdown run out) ends in shim's "Verification failed: (0x1A) Security Violation"; there is no fallback loader.
 
+### A failed systemd-boot setup keeps GRUB
+
+Before the first boot, hide MOK Manager's link in the test disk's root filesystem (`usr/lib/shim/mmx64.efi.signed`, in a private mount namespace), so the systemd-boot package installs shim without it. First boot must then log "MOK Manager is missing", "GRUB is kept as the boot loader until this works" and "systemd-boot setup failed; retried next boot", leave GRUB's entry first in the boot order and its files in place, and the next boot must come up through GRUB with Secure Boot on. Put the link back and boot again: first boot finishes as above, putting the existing "Ubuntu" entry first.
+
 ## Results
+
+2026-10-28, LordNikon, KVM, ISO built from the `fix/firstboot-grub-order` branch (first boot keeps GRUB until systemd-boot is checked; the review's low findings):
+
+- With MOK Manager's link hidden, first boot stopped at the check and put GRUB's entry back first; the "Ubuntu" entry stayed outside the boot order and GRUB's files were untouched. The reboot came up through GRUB with Secure Boot on.
+- With the link back, the next boot put "Ubuntu" first, removed GRUB (packages, `/boot/grub`, `grubx64.efi` and `grub.cfg`, its entry), queued the key and rebooted into MOK Manager. After enrollment: shim -> systemd-boot 261.3-0ubuntu3 signed with the Kernel Pop key, Secure Boot on, "Ubuntu" the only Linux entry, the fallback's `BOOTX64.CSV` starting systemd-boot, no failed units.
+- First login checked each AppImage against its release's sha256 and integrated Green Light 2.10.5, Kernel Pop 2.2.4, Steam Punk 0.7.1 and Neural Forge 3.9.2. `grdctl` took the password on stdin (one with a space and `|`) for Desktop Sharing and Remote Login; FreeRDP logged in on 3390 and 3389 and was refused with a wrong password.
+- The build checked FreeRDP and Remmina out at their pinned commits. The autostart entry passes `desktop-file-validate`.
+- Update path: apt exited 0, `dpkg --audit` was clean, both re-added "Linux Boot Manager" entries were removed, and the system rebooted fine.
+
 
 2026-10-26, LordNikon, KVM, ISO built from 587c807 plus the fixes made during this run:
 

@@ -19,6 +19,8 @@ STATE=/var/lib/custom-iso
 MOK_DIR=/var/lib/kernel-pop/mok
 SIGN_KEY_CN="Kernel Pop kernel signing key"
 MOK_PASSWORD="enrollmok"      # one-time, typed once at the blue MOK Manager screen
+MOK_PENDING_LIST=/var/lib/mok-pending/list
+MOKNEW=/sys/firmware/efi/efivars/MokNew-605dab50-e046-4300-abb6-3dd810dd8b23
 ESP=/boot/efi
 LOG=/var/log/custom-iso-firstboot.log
 
@@ -137,6 +139,23 @@ EOF
 
 secure_boot_on() { mokutil --sb-state 2>/dev/null | grep -q "SecureBoot enabled"; }
 
+# The list of keys waiting in shim's enrollment request that Kernel Pop and
+# the other apps rebuilding that request share (Kernel Pop's AGENTS.md):
+# "moknew-size <MokNew's size>", then each waiting key's lowercase SHA1.
+# They trust it only while MokNew still has that size.
+write_mok_pending_list() {
+    local list="$MOK_PENDING_LIST" size sha1 tmp
+    size="$(stat -c %s "$MOKNEW" 2>/dev/null)" || return 1
+    sha1="$(openssl x509 -inform DER -in "$MOK_DIR/signing.der" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')"
+    [[ -n "$sha1" ]] || return 1
+    mkdir -p "$(dirname "$list")" && chmod 0755 "$(dirname "$list")" || return 1
+    tmp="$(mktemp "$(dirname "$list")/.list.XXXXXX")" || return 1
+    if printf 'moknew-size %s\n%s\n' "$size" "$sha1" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$list"; then
+        return 0
+    fi
+    rm -f "$tmp"; return 1
+}
+
 queue_mok() {
     is_done mok-queued && return 0
     if ! secure_boot_on; then
@@ -150,8 +169,11 @@ queue_mok() {
     hash="$(mktemp)"
     printf '%s\n%s\n' "$MOK_PASSWORD" "$MOK_PASSWORD" | mokutil --generate-hash 2>/dev/null \
         | grep -E '^\$' > "$hash"
-    mokutil --import "$MOK_DIR/signing.der" --hash-file "$hash" \
-        && { log "Key queued for enrollment"; done_mark mok-queued; echo "$(openssl x509 -inform DER -in "$MOK_DIR/signing.der" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')" > /var/lib/kernel-pop/mok-pending; chmod 0644 /var/lib/kernel-pop/mok-pending; }
+    if mokutil --import "$MOK_DIR/signing.der" --hash-file "$hash"; then
+        log "Key queued for enrollment"
+        done_mark mok-queued; done_mark mok-waiting
+        write_mok_pending_list || log "WARNING: could not write $MOK_PENDING_LIST: Kernel Pop shows the key as not enrolled until it is"
+    fi
     rm -f "$hash"
 }
 
@@ -185,7 +207,7 @@ if is_done sdboot-installed && is_done mok-queued && is_done remote-login; then
 fi
 
 # Reboot once into MOK Manager when a key is waiting.
-if secure_boot_on && [[ -e /var/lib/kernel-pop/mok-pending ]] && ! is_done mok-reboot; then
+if secure_boot_on && is_done mok-waiting && ! is_done mok-reboot; then
     done_mark mok-reboot
     log "Rebooting into MOK Manager to enroll the signing key (password: $MOK_PASSWORD)"
     systemctl --no-block reboot

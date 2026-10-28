@@ -15,6 +15,9 @@ MOK_DIR=/var/lib/kernel-pop/mok
 ESP=/boot/efi
 SD_SRC=/usr/lib/systemd/boot/efi/systemd-bootx64.efi
 SD_SIGNED="$SD_SRC.signed"
+# sha256 of the binary the .signed copy was made from. The same stamp Kernel
+# Pop keeps (its sign_boot_loader), so both re-sign only for a new binary.
+STAMP=/var/lib/kernel-pop/systemd-boot-signed-from
 
 log() { echo "[custom-iso] $*"; }
 
@@ -24,14 +27,19 @@ sign_only() {
     have_key || { log "No signing key in $MOK_DIR yet"; return 1; }
     [[ -f "$SD_SRC" ]] || { log "ERROR: $SD_SRC missing"; return 1; }
     # Re-sign when the package shipped a new binary since the last signing.
-    if [[ -f "$SD_SIGNED" && "$SD_SIGNED" -nt "$SD_SRC" ]] \
+    # By content: dpkg gives a file the package's time, so a new binary is
+    # usually older than the .signed copy made at first boot.
+    local want tmp
+    want="$(sha256sum "$SD_SRC" | cut -d' ' -f1)"
+    if [[ -f "$SD_SIGNED" && "$(cat "$STAMP" 2>/dev/null)" == "$want" ]] \
         && sbverify --cert "$MOK_DIR/signing.pem" "$SD_SIGNED" >/dev/null 2>&1; then
         return 0
     fi
-    local tmp; tmp="$(mktemp "$SD_SIGNED.XXXXXX")"
+    tmp="$(mktemp "$SD_SIGNED.XXXXXX")"
     if sbsign --key "$MOK_DIR/signing.key" --cert "$MOK_DIR/signing.pem" --output "$tmp" "$SD_SRC" >/dev/null 2>&1 \
-        && sbverify --cert "$MOK_DIR/signing.pem" "$tmp" >/dev/null 2>&1; then
-        chmod 0644 "$tmp"; mv -f "$tmp" "$SD_SIGNED"
+        && sbverify --cert "$MOK_DIR/signing.pem" "$tmp" >/dev/null 2>&1 \
+        && chmod 0644 "$tmp" && mv -f "$tmp" "$SD_SIGNED"; then
+        echo "$want" > "$STAMP"
         log "Signed systemd-boot: $SD_SIGNED"
     else
         rm -f "$tmp"; log "ERROR: signing systemd-boot failed"; return 1

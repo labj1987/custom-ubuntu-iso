@@ -80,11 +80,22 @@ have="$(sha256sum "$ISO" | cut -d' ' -f1)"
 # ── 2. Install layers ─────────────────────────────────────────────────────
 log "Extracting the install layers"
 mkdir -p "$WORK/layers"
-for f in minimal.squashfs minimal.standard.squashfs minimal.standard.en.squashfs md5sum.txt; do
-    src="/casper/$f"; [[ "$f" == md5sum.txt ]] && src="/md5sum.txt"
-    [[ -f "$WORK/layers/$f" ]] || xorriso -osirrox on -indev "$ISO" -extract "$src" "$WORK/layers/$f" >/dev/null 2>&1
-done
+# md5sum.txt always comes from this ISO, and a layer kept from an earlier run
+# (of another ISO, or cut off part way) is used only while it matches it.
+rm -f "$WORK/layers/md5sum.txt"
+xorriso -osirrox on -indev "$ISO" -extract /md5sum.txt "$WORK/layers/md5sum.txt" >/dev/null 2>&1
 chmod u+w "$WORK/layers/md5sum.txt"
+layer_ok() {
+    local want
+    want="$(awk -v p="./casper/$1" '$2 == p {print $1; exit}' "$WORK/layers/md5sum.txt")"
+    [[ -n "$want" && -f "$WORK/layers/$1" && "$(md5sum < "$WORK/layers/$1" | cut -d' ' -f1)" == "$want" ]]
+}
+for f in minimal.squashfs minimal.standard.squashfs minimal.standard.en.squashfs; do
+    layer_ok "$f" && continue
+    rm -f "$WORK/layers/$f"
+    xorriso -osirrox on -indev "$ISO" -extract "/casper/$f" "$WORK/layers/$f" >/dev/null 2>&1
+    layer_ok "$f" || { echo "$f does not match the ISO's md5sum.txt" >&2; exit 1; }
+done
 
 log "Stacking minimal -> standard -> en under an overlay"
 rm -rf "$WORK/upper" "$WORK/ovl-work"

@@ -9,6 +9,7 @@
 set -uo pipefail
 
 STATE="$HOME/.local/state/custom-iso"
+[[ -e "$STATE/done" ]] && exit 0
 mkdir -p "$STATE"
 exec >> "$STATE/firstlogin.log" 2>&1
 log() { echo "[$(date '+%F %T')] $*"; }
@@ -29,15 +30,22 @@ wait_for_network() {
 install_apps() {
     [[ -e "$STATE/apps-done" ]] && return 0
     wait_for_network || { log "No network: AppImages are retried next login"; return 1; }
-    local repo url name dl ok=1
+    local repo asset url digest name dl ok=1
     mkdir -p "$HOME/.cache"
     dl="$(mktemp -d "$HOME/.cache/custom-iso-apps.XXXXXX")"
     for repo in green-light kernel-pop steam-punk neural-forge; do
-        url="$(curl -fsSL "https://api.github.com/repos/labj1987/$repo/releases/latest" \
-            | jq -r '.assets[] | select(.name | endswith("-x86_64.AppImage")) | .browser_download_url' | head -1)"
+        # The release's own record of the asset: its URL and GitHub's sha256.
+        asset="$(curl -fsSL "https://api.github.com/repos/labj1987/$repo/releases/latest" \
+            | jq -r 'first(.assets[] | select(.name | endswith("-x86_64.AppImage"))) | "\(.browser_download_url) \(.digest // "")"')"
+        url="${asset%% *}"; digest="${asset#* }"
         if [[ -z "$url" ]]; then log "ERROR: no AppImage in the latest $repo release"; ok=0; continue; fi
+        if [[ "$digest" != sha256:* ]]; then log "ERROR: the latest $repo release gives no sha256 for its AppImage"; ok=0; continue; fi
         name="$(basename "$url")"
-        if curl -fsSL -o "$dl/$name" "$url"; then
+        if ! curl -fsSL -o "$dl/$name" "$url"; then
+            log "ERROR: download failed: $url"; ok=0
+        elif [[ "$(sha256sum < "$dl/$name" | cut -d' ' -f1)" != "${digest#sha256:}" ]]; then
+            log "ERROR: $name does not match its release's sha256"; ok=0
+        else
             chmod +x "$dl/$name"
             # Exits 0 with "already integrated" when it is.
             if gearlever --integrate "$dl/$name" -y; then
@@ -45,8 +53,6 @@ install_apps() {
             else
                 log "ERROR: Gear Lever could not integrate $name"; ok=0
             fi
-        else
-            log "ERROR: download failed: $url"; ok=0
         fi
     done
     rm -rf "$dl"
@@ -71,10 +77,11 @@ setup_rdp() {
     user="${form%%|*}"; pass="${form#*|}"
     [[ -n "$user" && -n "$pass" ]] || { log "Empty remote desktop login; asked again next login"; return 1; }
 
-    # Desktop Sharing: this user's live session.
+    # Desktop Sharing: this user's live session. grdctl reads a password it
+    # isn't given from stdin, which keeps it out of the process list.
     grdctl rdp set-tls-cert "$d/rdp-tls.crt" \
         && grdctl rdp set-tls-key "$d/rdp-tls.key" \
-        && grdctl rdp set-credentials "$user" "$pass" \
+        && printf '%s\n' "$pass" | grdctl rdp set-credentials "$user" \
         && grdctl rdp disable-view-only \
         && grdctl rdp set-port 3390 \
         && grdctl rdp disable-port-negotiation \
@@ -83,7 +90,7 @@ setup_rdp() {
         || { log "ERROR: Desktop Sharing setup failed"; return 1; }
 
     # Remote Login: the login screen (system service, set up at first boot).
-    sudo -n grdctl --system rdp set-credentials "$user" "$pass" \
+    printf '%s\n' "$pass" | sudo -n grdctl --system rdp set-credentials "$user" \
         && sudo -n systemctl restart gnome-remote-desktop.service \
         || { log "ERROR: Remote Login credentials failed"; return 1; }
     user=""; pass=""; form=""

@@ -2,7 +2,7 @@
 Type=Application
 Name=First login setup
 Comment=Installs the AppImage apps and sets up remote desktop
-Exec=/bin/sh -c '[ -e "$HOME/.local/state/custom-iso/done" ] || exec /usr/local/lib/custom-iso/firstlogin.sh'
+Exec=/usr/local/lib/custom-iso/firstlogin.sh
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=10
